@@ -1,16 +1,15 @@
 """Floating-point SOS Lyapunov search for the Bayesian Bertrand frontier.
 
-This SDP finds numerical Lyapunov functions without exact verification.
-solver_deflated.py modifies it to enable exact rational verification,
-which currently succeeds for only a small subset of instances.
+This SDP finds numerical Lyapunov functions. Feasibility is reported
+from the solver's own termination status, in floating-point arithmetic
+and without exact rational verification.
 
 The q-metric is Hinv=diag(x_i**(2-q)), q in {0,1,2}. On the truncated
 simplex x_i>=delta, sum(x)<=m, use L=Phi(x-x*)^T M Phi(x-x*) with
 tau*diag(I_m,0)<=M<=I. Decrease certifies dL/dt<=-c*r*L, where r is
 the absolute spectral abscissa of Hinv(x*) Dv(x*). Boundary constraints
 certify compatibility with each face. Shared SOS primitives live in
-src/sos_common.py. This solver reports numerical feasibility; exact
-rational verification is implemented in solver_deflated.py.
+src/sos_common.py.
 
 Use scripts/reproduce.py to replay the parameter rows stored in results.
 """

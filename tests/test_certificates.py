@@ -1,4 +1,4 @@
-"""Regression checks for the retained model and exact certificate primitives."""
+"""Regression checks for the retained model and rescaled SOS primitives."""
 from pathlib import Path
 import csv
 import sys
@@ -11,11 +11,13 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts/general_lyapunov"))
 sys.path.insert(0, str(ROOT / "scripts/geometry"))
 
-from sos_common import build_game, build_metric_matrix, build_stacked_lyapunov
+from sos_common import (
+    build_game, build_metric_matrix, build_stacked_lyapunov, sdp_size,
+)
 from mstar_delta_grid import compute_mstar
-from solver_deflated import (
-    _project_to_affine_exact, decrease_rate_term, exact_rationalize_L,
-    is_psd_exact, build_sdp_problem_v2,
+from solver_rescaled import (
+    boundary_intrinsic_degree_rescaled, build_sdp_problem_rescaled,
+    decrease_intrinsic_degree_rescaled, multiplier_degree_floor, spectral_rate,
 )
 
 
@@ -29,44 +31,54 @@ def test_equilibrium_and_candidate_vanish(s):
     assert all(sp.expand(g.subs(at_star)) == 0 for g in gradient)
 
 
-@pytest.mark.parametrize("matrix,expected", [
-    ([[2, 1], [1, 2]], True), ([[1, 1], [1, 1]], True),
-    ([[1, 2], [2, 1]], False), ([[1, 1], [0, 1]], False),
+@pytest.mark.parametrize("intrinsic,expected", [
+    (-1, 0), (0, 0), (1, 0), (2, 2), (5, 4), (6, 6),
 ])
-def test_exact_psd(matrix, expected):
-    assert is_psd_exact(sp.Matrix(matrix))[0] is expected
+def test_multiplier_degree_floor(intrinsic, expected):
+    """The floor is the smallest even degree at least intrinsic-1."""
+    floor = multiplier_degree_floor(intrinsic)
+    assert floor == expected
+    assert floor % 2 == 0 and floor >= 0
 
 
-def test_rational_projection_preserves_identity():
-    B = sp.Matrix([[1, 2, 0], [0, 1, 1]])
-    b = sp.Matrix([sp.Rational(1, 3), sp.Rational(2, 7)])
-    projected = _project_to_affine_exact(sp.zeros(3, 1), B, b)
-    assert B * projected == b
-    assert all(value.is_Rational for value in projected)
+def test_spectral_rate_is_hurwitz_and_rational():
+    x, v, xstar, _ = build_game(2, 1, 2, 2)
+    Hinv = build_metric_matrix(2, 1, 2, 2, "q", q=2)
+    r, alpha = spectral_rate(x, v, xstar, Hinv)
+    assert alpha < 0
+    assert r.is_Rational and r > 0
+    assert abs(float(r) - abs(alpha)) <= 1e-6
 
 
-def test_archived_rate_forms_are_distinct():
-    x = sp.symbols("x1:3", positive=True)
-    p = sp.prod(x)
-    L = sum((xi - sp.Rational(1, 2)) ** 2 for xi in x)
-    assert sp.expand(decrease_rate_term(x, 2, L, p, "L") - p * L) == 0
-    assert sp.expand(decrease_rate_term(x, 2, L, p, "pL") - p**2 * L) == 0
-    with pytest.raises(ValueError):
-        decrease_rate_term(x, 2, L, p, "invalid")
-
-
-@pytest.mark.parametrize("rate", ["L", "pL"])
-def test_deflated_problem_builds_and_remembers_grams(rate):
-    built = build_sdp_problem_v2(2, 1, 2, 2, 2, 6, 2, 2, decrease_rate=rate)
+def test_rescaled_problem_builds_at_archived_size():
+    """s=2, l=1, n=2, m=2, q=2 is the smallest archived row: 199 variables."""
+    d_L, m = 2, 2
+    d_dec = multiplier_degree_floor(
+        decrease_intrinsic_degree_rescaled(2, 1, 2, m, d_L, "q", q=2))
+    d_bnd = multiplier_degree_floor(
+        boundary_intrinsic_degree_rescaled(2, 1, 2, m, d_L, "q", q=2))
+    assert (d_dec, d_bnd) == (4, 0)
+    built = build_sdp_problem_rescaled(
+        2, 1, 2, m, d_L, d_dec, d_bnd, 1e-4, 1.0, sp.Rational(1, 250),
+        metric="q", q=2)
     prob, L, x, xstar = built[:4]
     assert sp.expand(L.subs(dict.fromkeys(x, xstar))) == 0
     assert prob.all_sos_constraints
-    assert all(hasattr(con, "param_poly") for con in prob.all_sos_constraints)
+    assert sdp_size(prob) == 199
 
 
 def test_only_retained_metrics_are_accepted():
     with pytest.raises(ValueError):
         build_metric_matrix(0, 1, 2, 2, "unknown", q=2)
+
+
+@pytest.mark.parametrize("bad", [{"c": 0.0}, {"c": 2.0}, {"tau": 0.0}])
+def test_rescaled_solver_rejects_out_of_range_constants(bad):
+    from solver_rescaled import solve_sdp_rescaled
+    kwargs = dict(s=2, l=1, n=2, m=2, q=2, d_L=2, d_dec=4, d_bnd=0)
+    kwargs.update(bad)
+    with pytest.raises(ValueError):
+        solve_sdp_rescaled(metric="q", verbose=False, **kwargs)
 
 
 def test_all_archived_minty_thresholds():
@@ -76,11 +88,3 @@ def test_all_archived_minty_thresholds():
     for row in rows:
         s, l, n = (int(row[key]) for key in ("s", "l", "n"))
         assert compute_mstar(l * (n - 1) + s, l * n) == int(row["mstar"])
-
-
-def test_sweep_imports_and_rate_choices():
-    from sweep_deflated import build_parser
-    for rate in ("L", "pL"):
-        args = build_parser().parse_args(["--decrease-rate", rate])
-        assert args.decrease_rate == rate
-        assert args.m_values == (2,)
